@@ -4,27 +4,31 @@ using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
 using TheAdventure.Models;
 using Point = Silk.NET.SDL.Point;
+using Rectangle = Silk.NET.Maths.Rectangle<int>;
 
 namespace TheAdventure;
 
 public unsafe class GameRenderer
 {
-    private Sdl _sdl;
-    private Renderer* _renderer;
-    private GameWindow _window;
-    private Camera _camera;
+    private readonly Sdl _sdl;
+    private readonly Renderer* _renderer;
+    private readonly GameWindow _window;
+    private readonly Camera _camera;
 
-    private Dictionary<int, IntPtr> _texturePointers = new();
-    private Dictionary<int, TextureData> _textureData = new();
+    private readonly Dictionary<int, IntPtr> _texturePointers = new();
+    private readonly Dictionary<int, TextureData> _textureData = new();
     private int _textureId;
+    
+    private Rectangle _savedViewport;
+    private (float X, float Y) _savedScale;
 
+    
+    
     public GameRenderer(Sdl sdl, GameWindow window)
     {
         _sdl = sdl;
-        
         _renderer = (Renderer*)window.CreateRenderer();
         _sdl.SetRenderDrawBlendMode(_renderer, BlendMode.Blend);
-        
         _window = window;
         var windowSize = window.Size;
         _camera = new Camera(windowSize.Width, windowSize.Height);
@@ -40,6 +44,72 @@ public unsafe class GameRenderer
         _camera.LookAt(x, y);
     }
 
+    public (int Width, int Height) GetScreenDimensions()
+    {
+        return (_camera.Width, _camera.Height);
+    }
+
+    public void SaveState()
+    {
+        unsafe
+        {
+            // Save viewport
+            fixed (Rectangle* viewportPtr = &_savedViewport)
+            {
+                _sdl.RenderGetViewport(_renderer, viewportPtr);
+            }
+            
+            // Save scale
+            float scaleX, scaleY;
+            _sdl.RenderGetScale(_renderer, &scaleX, &scaleY);
+            _savedScale = (scaleX, scaleY);
+        }
+    }
+
+    public void RestoreState()
+    {
+        // Restore viewport (using 'in' for readonly reference)
+        _sdl.RenderSetViewport(_renderer, in _savedViewport);
+        
+        // Restore scale
+        _sdl.RenderSetScale(_renderer, _savedScale.X, _savedScale.Y);
+    }
+
+    public void ResetView()
+    {
+        // Create temporary variable for viewport to satisfy 'ref readonly'
+        var viewport = new Rectangle(0, 0, _camera.Width, _camera.Height);
+        _sdl.RenderSetViewport(_renderer, in viewport);
+        
+        _sdl.RenderSetScale(_renderer, 1.0f, 1.0f);
+    }
+
+    public void ApplyDimEffect(float alpha)
+    {
+        // Create a semi-transparent black rectangle over the whole screen
+        var dimRect = new Rectangle(0, 0, _camera.Width, _camera.Height);
+        
+        // Set draw color to black with specified alpha
+        _sdl.SetRenderDrawColor(_renderer, 0, 0, 0, (byte)(alpha * 255));
+        _sdl.SetRenderDrawBlendMode(_renderer, BlendMode.Blend);
+        _sdl.RenderFillRect(_renderer, in dimRect);
+    }
+    
+    public void RenderTextureScreenSpace(int textureId, Rectangle src, Rectangle dst)
+    {
+        if (!_texturePointers.TryGetValue(textureId, out var imageTexture)) return;
+
+        SaveState();
+        ResetView();
+        
+        // Create local copies to satisfy 'ref readonly' parameters
+        var srcCopy = src;
+        var dstCopy = dst;
+        _sdl.RenderCopy(_renderer, (Texture*)imageTexture, in srcCopy, in dstCopy);
+        
+        RestoreState();
+    }
+
     public int LoadTexture(string fileName, out TextureData textureInfo)
     {
         using (var fStream = new FileStream(fileName, FileMode.Open))
@@ -50,9 +120,9 @@ public unsafe class GameRenderer
                 Width = image.Width,
                 Height = image.Height
             };
-            var imageRAWData = new byte[textureInfo.Width * textureInfo.Height * 4];
-            image.CopyPixelDataTo(imageRAWData.AsSpan());
-            fixed (byte* data = imageRAWData)
+            var imageRawData = new byte[textureInfo.Width * textureInfo.Height * 4];
+            image.CopyPixelDataTo(imageRawData.AsSpan());
+            fixed (byte* data = imageRawData)
             {
                 var imageSurface = _sdl.CreateRGBSurfaceWithFormatFrom(data, textureInfo.Width,
                     textureInfo.Height, 8, textureInfo.Width * 4, (uint)PixelFormatEnum.Rgba32);
@@ -74,11 +144,10 @@ public unsafe class GameRenderer
                 _texturePointers[_textureId] = (IntPtr)imageTexture;
             }
         }
-
         return _textureId++;
     }
 
-    public void RenderTexture(int textureId, Rectangle<int> src, Rectangle<int> dst,
+    public void RenderTexture(int textureId, Rectangle src, Rectangle dst,
         RendererFlip flip = RendererFlip.None, double angle = 0.0, Point center = default)
     {
         if (_texturePointers.TryGetValue(textureId, out var imageTexture))
