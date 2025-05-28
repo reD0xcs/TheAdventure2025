@@ -110,8 +110,21 @@ public unsafe class GameRenderer
         RestoreState();
     }
 
+    public void ClearTextures()
+    {
+        foreach (var texturePtr in _texturePointers.Values)
+        {
+            _sdl.DestroyTexture((Texture*)texturePtr);
+        }
+        _texturePointers.Clear();
+        _textureData.Clear();
+        _textureId = 0; // Reset the counter
+    }
+    
     public int LoadTexture(string fileName, out TextureData textureInfo)
     {
+        var textureId = _textureId++; // Increment first to start from 1
+        Console.WriteLine($"Loading texture {fileName} with ID {textureId}");
         using (var fStream = new FileStream(fileName, FileMode.Open))
         {
             var image = Image.Load<Rgba32>(fStream);
@@ -130,21 +143,21 @@ public unsafe class GameRenderer
                 {
                     throw new Exception("Failed to create surface from image data.");
                 }
-                
+            
                 var imageTexture = _sdl.CreateTextureFromSurface(_renderer, imageSurface);
                 if (imageTexture == null)
                 {
                     _sdl.FreeSurface(imageSurface);
                     throw new Exception("Failed to create texture from surface.");
                 }
-                
+            
                 _sdl.FreeSurface(imageSurface);
-                
-                _textureData[_textureId] = textureInfo;
-                _texturePointers[_textureId] = (IntPtr)imageTexture;
+            
+                _textureData[textureId] = textureInfo;
+                _texturePointers[textureId] = (IntPtr)imageTexture;
             }
         }
-        return _textureId++;
+        return textureId;
     }
 
     public void RenderTexture(int textureId, Rectangle src, Rectangle dst,

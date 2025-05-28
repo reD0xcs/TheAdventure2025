@@ -13,13 +13,18 @@ public class Engine
     private readonly Input _input;
     private readonly ScriptEngine _scriptEngine = new();
 
+    private int _gameOverTextureId;
+    private bool _isGameOver = false;
+    private DateTimeOffset _gameOverTime;
+    private bool _showingGameOver = false;
+
     // Day/Night Cycle
     private bool _isDayTime = true;
     private DateTimeOffset _lastCycleChange = DateTimeOffset.Now;
     private float _nightDimAlpha = 0.7f;
     private float _currentCycleProgress = 0f;
-    private const float DayLength = 10f; // 2 minutes
-    private const float NightLength = 10f; // 1 minute
+    private const float DayLength = 10f;
+    private const float NightLength = 10f;
 
     // HUD Elements
     private const int HudIconSize = 48;
@@ -28,6 +33,7 @@ public class Engine
     private int _moonTextureId;
     private TextureData _sunTextureData;
     private TextureData _moonTextureData;
+	private TextureData _gameOverTextureData;
 
     private readonly Dictionary<int, GameObject> _gameObjects = new();
     private readonly Dictionary<string, TileSet> _loadedTileSets = new();
@@ -42,42 +48,56 @@ public class Engine
         _renderer = renderer;
         _input = input;
         _input.OnMouseClick += (_, coords) => AddBomb(coords.x, coords.y);
+        SetupWorld();
     }
 
     public void SetupWorld()
+{
+    // Clear existing textures and objects
+    _gameObjects.Clear();
+    _loadedTileSets.Clear();
+    _tileIdMap.Clear();
+    
+    _gameOverTextureId = _renderer.LoadTexture(Path.Combine("Assets", "game_over.png"), out _gameOverTextureData);
+    _isGameOver = false;
+    _showingGameOver = false;
+    _player = new(SpriteSheet.Load(_renderer, "Player.json", "Assets"), 100, 100);
+    _player.OnGameOver += () => _isGameOver = true;
+
+    var levelContent = File.ReadAllText(Path.Combine("Assets", "terrain.tmj"));
+    var level = JsonSerializer.Deserialize<Level>(levelContent) ?? throw new Exception("Failed to load level");
+
+    foreach (var tileSetRef in level.TileSets)
     {
-        _player = new(SpriteSheet.Load(_renderer, "Player.json", "Assets"), 100, 100);
+        var tileSetContent = File.ReadAllText(Path.Combine("Assets", tileSetRef.Source));
+        var tileSet = JsonSerializer.Deserialize<TileSet>(tileSetContent) ?? throw new Exception("Failed to load tile set");
 
-        var levelContent = File.ReadAllText(Path.Combine("Assets", "terrain.tmj"));
-        var level = JsonSerializer.Deserialize<Level>(levelContent) ?? throw new Exception("Failed to load level");
-
-        foreach (var tileSetRef in level.TileSets)
+        foreach (var tile in tileSet.Tiles)
         {
-            var tileSetContent = File.ReadAllText(Path.Combine("Assets", tileSetRef.Source));
-            var tileSet = JsonSerializer.Deserialize<TileSet>(tileSetContent) ?? throw new Exception("Failed to load tile set");
-
-            foreach (var tile in tileSet.Tiles)
+            // Skip if tile ID already exists
+            if (tile.Id.HasValue && !_tileIdMap.ContainsKey(tile.Id.Value))
             {
                 tile.TextureId = _renderer.LoadTexture(Path.Combine("Assets", tile.Image), out _);
-                _tileIdMap.Add(tile.Id!.Value, tile);
+                _tileIdMap.Add(tile.Id.Value, tile);
             }
-            _loadedTileSets.Add(tileSet.Name, tileSet);
         }
-
-        if (level.Width == null || level.Height == null || level.TileWidth == null || level.TileHeight == null)
-            throw new Exception("Invalid level dimensions");
-
-        _renderer.SetWorldBounds(new Rectangle<int>(0, 0, 
-            level.Width.Value * level.TileWidth.Value,
-            level.Height.Value * level.TileHeight.Value));
-
-        _currentLevel = level;
-        _scriptEngine.LoadAll(Path.Combine("Assets", "Scripts"));
-        
-        // Load HUD textures
-        _sunTextureId = _renderer.LoadTexture(Path.Combine("Assets", "sun.png"), out _sunTextureData);
-        _moonTextureId = _renderer.LoadTexture(Path.Combine("Assets", "moon.png"), out _moonTextureData);
+        _loadedTileSets.Add(tileSet.Name, tileSet);
     }
+
+    if (level.Width == null || level.Height == null || level.TileWidth == null || level.TileHeight == null)
+        throw new Exception("Invalid level dimensions");
+
+    _renderer.SetWorldBounds(new Rectangle<int>(0, 0, 
+        level.Width.Value * level.TileWidth.Value,
+        level.Height.Value * level.TileHeight.Value));
+
+    _currentLevel = level;
+    _scriptEngine.LoadAll(Path.Combine("Assets", "Scripts"));
+    
+    // Load HUD textures
+    _sunTextureId = _renderer.LoadTexture(Path.Combine("Assets", "sun.png"), out _sunTextureData);
+    _moonTextureId = _renderer.LoadTexture(Path.Combine("Assets", "moon.png"), out _moonTextureData);
+}
 
     private void UpdateDayNightCycle()
     {
@@ -100,11 +120,9 @@ public class Engine
         var (screenWidth, _) = _renderer.GetScreenDimensions();
         var position = new Vector2D<int>(screenWidth - HudIconSize - HudPadding, HudPadding);
 
-        // Choose correct texture
         var textureId = _isDayTime ? _sunTextureId : _moonTextureId;
         var textureData = _isDayTime ? _sunTextureData : _moonTextureData;
         
-        // Render icon
         var srcRect = new Rectangle<int>(0, 0, textureData.Width, textureData.Height);
         var dstRect = new Rectangle<int>(position.X, position.Y, HudIconSize, HudIconSize);
         _renderer.RenderTextureScreenSpace(textureId, srcRect, dstRect);
@@ -112,6 +130,20 @@ public class Engine
 
     public void ProcessFrame()
     {
+        if (_isGameOver)
+        {
+            if (!_showingGameOver)
+            {
+                _gameOverTime = DateTimeOffset.Now;
+                _showingGameOver = true;
+            }
+            else if ((DateTimeOffset.Now - _gameOverTime).TotalSeconds >= 5)
+            {
+                ResetGame();
+            }
+            return;
+        }
+    
         var currentTime = DateTimeOffset.Now;
         var msSinceLastFrame = (currentTime - _lastUpdate).TotalMilliseconds;
         _lastUpdate = currentTime;
@@ -120,7 +152,6 @@ public class Engine
         
         if (_player == null) return;
 
-        // Handle player input
         double up = _input.IsUpPressed() ? 1.0 : 0.0;
         double down = _input.IsDownPressed() ? 1.0 : 0.0;
         double left = _input.IsLeftPressed() ? 1.0 : 0.0;
@@ -149,45 +180,61 @@ public class Engine
         RenderTerrain();
         RenderAllObjects();
 
-        // Calculate smooth darkness transition
-        float darkness = 0f;
-        if (_isDayTime)
+        if (!_isGameOver)
         {
-            // Last 25% of day: fade to dark
-            if (_currentCycleProgress > 0.75f) 
+            float darkness = 0f;
+            if (_isDayTime)
             {
-                darkness = (_currentCycleProgress - 0.75f) * 4f; // Scale to 0-1
+                if (_currentCycleProgress > 0.75f) 
+                {
+                    darkness = (_currentCycleProgress - 0.75f) * 4f;
+                }
             }
-        }
-        else
-        {
-            // First 25% of night: stay dark
-            if (_currentCycleProgress <= 0.25f)
-            {
-                darkness = 1f;
-            }
-            // Last 25% of night: fade to light
-            else if (_currentCycleProgress > 0.75f)
-            {
-                darkness = 1f - ((_currentCycleProgress - 0.75f) * 4f);
-            }
-            // Middle of night: stay dark
             else
             {
-                darkness = 1f;
+                if (_currentCycleProgress <= 0.25f)
+                {
+                    darkness = 1f;
+                }
+                else if (_currentCycleProgress > 0.75f)
+                {
+                    darkness = 1f - ((_currentCycleProgress - 0.75f) * 4f);
+                }
+                else
+                {
+                    darkness = 1f;
+                }
             }
-        }
 
-        if (darkness > 0f)
+            if (darkness > 0f)
+            {
+                _renderer.ApplyDimEffect(darkness * _nightDimAlpha);
+            }
+
+            RenderDayNightIcon();
+        }
+        else if (_showingGameOver)
         {
-            _renderer.ApplyDimEffect(darkness * _nightDimAlpha);
+            _renderer.ApplyDimEffect(0.7f);
+            RenderGameOverScreen();
         }
-
-        // Render HUD icon
-        RenderDayNightIcon();
 
         _renderer.PresentFrame();
     }
+
+    private void RenderGameOverScreen()
+{
+    var (screenWidth, screenHeight) = _renderer.GetScreenDimensions();
+    
+    int width = _gameOverTextureData.Width;
+    int height = _gameOverTextureData.Height;
+    int x = (screenWidth - width) / 2;
+    int y = (screenHeight - height) / 2;
+    
+    var srcRect = new Rectangle<int>(0, 0, width, height);
+    var dstRect = new Rectangle<int>(x, y, width, height);
+    _renderer.RenderTextureScreenSpace(_gameOverTextureId, srcRect, dstRect);
+}
 
     public void RenderAllObjects()
     {
@@ -217,6 +264,21 @@ public class Engine
 
         _player?.Render(_renderer);
     }
+
+    public void ResetGame()
+{
+    // Clear all game objects and textures
+    _gameObjects.Clear();
+    _loadedTileSets.Clear();
+    _tileIdMap.Clear();
+    
+    // Reset game state
+    _isGameOver = false;
+    _showingGameOver = false;
+    
+    // Setup a fresh world
+    SetupWorld();
+}
 
     public void RenderTerrain()
     {
@@ -271,4 +333,3 @@ public class Engine
         _gameObjects.Add(bomb.Id, bomb);
     }
 }
-

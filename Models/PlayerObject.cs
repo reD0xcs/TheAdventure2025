@@ -5,7 +5,7 @@ namespace TheAdventure.Models;
 public class PlayerObject : RenderableGameObject
 {
     private const int _speed = 128; // pixels per second
-
+    public event Action OnGameOver = delegate { }; // Initialize with empty delegate
     public enum PlayerStateDirection
     {
         None = 0,
@@ -29,6 +29,7 @@ public class PlayerObject : RenderableGameObject
     public PlayerObject(SpriteSheet spriteSheet, int x, int y) : base(spriteSheet, (x, y))
     {
         SetState(PlayerState.Idle, PlayerStateDirection.Down);
+        OnGameOver = delegate { }; // Initialize the event
     }
 
     public void SetState(PlayerState state)
@@ -38,28 +39,20 @@ public class PlayerObject : RenderableGameObject
 
     public void SetState(PlayerState state, PlayerStateDirection direction)
     {
-        if (State.State == PlayerState.GameOver)
-        {
-            return;
-        }
-
-        if (State.State == state && State.Direction == direction)
-        {
-            return;
-        }
+        if (State.State == PlayerState.GameOver) return;
+        if (State.State == state && State.Direction == direction) return;
 
         if (state == PlayerState.None && direction == PlayerStateDirection.None)
         {
             SpriteSheet.ActivateAnimation(null);
         }
-
         else if (state == PlayerState.GameOver)
         {
-            SpriteSheet.ActivateAnimation(Enum.GetName(state));
+            SpriteSheet.ActivateAnimation("GameOver");
         }
         else
         {
-            var animationName = Enum.GetName(state) + Enum.GetName(direction);
+            var animationName = $"{state}{direction}";
             SpriteSheet.ActivateAnimation(animationName);
         }
 
@@ -69,6 +62,7 @@ public class PlayerObject : RenderableGameObject
     public void GameOver()
     {
         SetState(PlayerState.GameOver, PlayerStateDirection.None);
+        OnGameOver?.Invoke();  // Notify subscribers
     }
 
     public void Attack()
